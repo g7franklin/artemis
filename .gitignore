@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Environment (secrets)
+.env
+backend/.env
+frontend/.env
+
+# Build / caches
+dist/
+build/
+frontend/dist/
+.cache/
+*.log
+.DS_Store
+
+# Firebase
+.firebase/
+firebase-debug.log
+
+# IDE
+.idea/

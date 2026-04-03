@@ -1,0 +1,14 @@
+rules_version = '2';
+
+// Client SDK (if you add Firestore reads from the PWA later). The Node backend uses the Admin SDK and bypasses these rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      match /sessions/{sessionId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+  }
+}
