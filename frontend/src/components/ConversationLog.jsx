@@ -7,15 +7,14 @@ export function ConversationLog({ lines }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [lines]);
 
-  if (!lines.length) {
-    return null;
-  }
-
   return (
     <div
       style={{
-        marginTop: '2rem',
-        maxHeight: '28vh',
+        marginTop: '1.25rem',
+        width: '100%',
+        maxWidth: '420px',
+        minHeight: '120px',
+        maxHeight: '32vh',
         overflowY: 'auto',
         padding: '0.75rem 1rem',
         borderRadius: '12px',
@@ -26,9 +25,15 @@ export function ConversationLog({ lines }) {
         lineHeight: 1.45,
       }}
     >
-      {lines.map((line, i) => (
-        <div key={`${i}-${line.slice(0, 24)}`}>{line}</div>
-      ))}
+      {lines.length === 0 ? (
+        <div style={{ color: '#666', fontStyle: 'italic' }}>
+          Conversation log — speak or type below and messages will appear here.
+        </div>
+      ) : (
+        lines.map((line, i) => (
+          <div key={`${i}-${line.slice(0, 24)}`}>{line}</div>
+        ))
+      )}
       <div ref={bottomRef} />
     </div>
   );

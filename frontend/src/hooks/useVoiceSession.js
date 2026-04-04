@@ -68,6 +68,7 @@ export function useVoiceSession(authUser) {
   const [voiceState, setVoiceState] = useState('idle');
   const [lastError, setLastError] = useState(null);
   const [logLines, setLogLines] = useState([]);
+  const [textSending, setTextSending] = useState(false);
 
   const wsRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
@@ -252,7 +253,6 @@ export function useVoiceSession(authUser) {
         ws.onopen = () => {
           clearTimeout(timeout);
           socketOpened = true;
-          setConnectionState('connected');
           appendLog('Connected to Artemis');
 
           readyTimer = setTimeout(() => {
@@ -276,6 +276,7 @@ export function useVoiceSession(authUser) {
             finish(() => {
               sessionReadyReceivedRef.current = true;
               reconnectAttemptRef.current = 0;
+              setConnectionState('connected');
               resolve(ws);
             });
           };
@@ -503,6 +504,33 @@ export function useVoiceSession(authUser) {
     });
   }, [stopCapture]);
 
+  const sendTextMessage = useCallback(
+    async (text) => {
+      const t = text.trim();
+      if (!t) return;
+      setLastError(null);
+      setTextSending(true);
+      try {
+        await connectWs();
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          throw new Error('Not connected');
+        }
+        if (!sessionReadyReceivedRef.current) {
+          throw new Error('Session not ready');
+        }
+        ws.send(JSON.stringify({ type: 'user_text', text: t }));
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setLastError(msg);
+        appendLog(`Send text: ${msg}`);
+      } finally {
+        setTextSending(false);
+      }
+    },
+    [connectWs, appendLog]
+  );
+
   const endSession = useCallback(() => {
     disconnectWs();
     stopCapture();
@@ -535,5 +563,7 @@ export function useVoiceSession(authUser) {
     endPushToTalk,
     endSession,
     connectWs,
+    sendTextMessage,
+    textSending,
   };
 }

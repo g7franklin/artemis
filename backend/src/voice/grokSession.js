@@ -202,6 +202,24 @@ export async function createGrokVoiceBridge(clientWs, instructions) {
     } else if (msg.type === 'end_turn') {
       grokWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
       sendClient({ type: 'status', state: 'thinking' });
+    } else if (msg.type === 'user_text' && typeof msg.text === 'string') {
+      const text = msg.text.trim().slice(0, 16000);
+      if (!text) return;
+      transcriptParts.push(`User: ${text}`);
+      sendClient({ type: 'transcript', role: 'user', text });
+      grokWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
+      grokWs.send(
+        JSON.stringify({
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text }],
+          },
+        })
+      );
+      grokWs.send(JSON.stringify({ type: 'response.create' }));
+      sendClient({ type: 'status', state: 'thinking' });
     } else if (msg.type === 'ping') {
       sendClient({ type: 'pong' });
     }

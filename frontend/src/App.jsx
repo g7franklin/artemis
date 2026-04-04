@@ -1,7 +1,8 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { VoiceButton } from './components/VoiceButton.jsx';
 import { StatusIndicator } from './components/StatusIndicator.jsx';
 import { ConversationLog } from './components/ConversationLog.jsx';
+import { TextComposer } from './components/TextComposer.jsx';
 import { isFirebaseClientConfigured } from './lib/firebaseConfig.js';
 import { useAuth } from './hooks/useAuth.js';
 import { useVoiceSession } from './hooks/useVoiceSession.js';
@@ -34,9 +35,9 @@ function AppMain() {
     beginPushToTalk,
     endPushToTalk,
     endSession,
+    sendTextMessage,
+    textSending,
   } = useVoiceSession(user);
-
-  const [showLog, setShowLog] = useState(false);
 
   const onPressStart = useCallback(() => {
     void beginPushToTalk();
@@ -85,13 +86,6 @@ function AppMain() {
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
           <button
             type="button"
-            onClick={() => setShowLog((v) => !v)}
-            style={ghostBtn}
-          >
-            {showLog ? 'Hide log' : 'Log'}
-          </button>
-          <button
-            type="button"
             onClick={() => {
               endSession();
               void logout();
@@ -128,7 +122,13 @@ function AppMain() {
         </p>
       ) : null}
 
-      {showLog ? <ConversationLog lines={logLines} /> : null}
+      <ConversationLog lines={logLines} />
+
+      <TextComposer
+        disabled={connectionState !== 'connected'}
+        sending={textSending}
+        onSend={sendTextMessage}
+      />
 
       <button
         type="button"
