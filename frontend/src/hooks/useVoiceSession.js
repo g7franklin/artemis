@@ -99,6 +99,8 @@ export function useVoiceSession(authUser) {
   const connectInFlightRef = useRef(null);
   /** @type {React.MutableRefObject<(() => Promise<unknown>) | null>} */
   const connectWsRef = useRef(null);
+  /** Resolves when `memories_flushed` arrives after `flush_memories` send. */
+  const pendingMemoriesFlushRef = useRef(null);
 
   const appendLog = useCallback((line) => {
     setLogLines((prev) => [...prev.slice(-200), line]);
@@ -288,6 +290,11 @@ export function useVoiceSession(authUser) {
             if (msg.type === 'session_ready') {
               pendingSessionReadyRef.current?.();
             }
+            if (msg.type === 'memories_flushed') {
+              const cb = pendingMemoriesFlushRef.current;
+              pendingMemoriesFlushRef.current = null;
+              cb?.(msg);
+            }
             if (msg.type === 'audio' && msg.payload) {
               playPcmBase64(msg.payload);
             } else if (msg.type === 'status' && msg.state) {
@@ -319,6 +326,7 @@ export function useVoiceSession(authUser) {
             readyTimer = null;
           }
           pendingSessionReadyRef.current = null;
+          pendingMemoriesFlushRef.current = null;
           sessionReadyReceivedRef.current = false;
 
           if (wsRef.current === ws) {
@@ -531,7 +539,41 @@ export function useVoiceSession(authUser) {
     [connectWs, appendLog]
   );
 
-  const endSession = useCallback(() => {
+  const endSession = useCallback(async () => {
+    const ws = wsRef.current;
+    if (
+      ws?.readyState === WebSocket.OPEN &&
+      sessionReadyReceivedRef.current
+    ) {
+      await new Promise((resolve) => {
+        const finish = () => resolve();
+        const timeout = setTimeout(() => {
+          pendingMemoriesFlushRef.current = null;
+          finish();
+        }, 10000);
+        pendingMemoriesFlushRef.current = (ack) => {
+          clearTimeout(timeout);
+          if (ack?.ok) {
+            const n = Number(ack.stored) || 0;
+            appendLog(
+              n > 0
+                ? `Saved ${n} memory update(s).`
+                : 'Session saved (no new memories extracted).'
+            );
+          } else if (ack && !ack.ok) {
+            appendLog(`Memory save: ${ack.error || 'failed'}`);
+          }
+          finish();
+        };
+        try {
+          ws.send(JSON.stringify({ type: 'flush_memories' }));
+        } catch {
+          clearTimeout(timeout);
+          pendingMemoriesFlushRef.current = null;
+          finish();
+        }
+      });
+    }
     disconnectWs();
     stopCapture();
     const p = playbackRef.current.ctx;
@@ -540,7 +582,7 @@ export function useVoiceSession(authUser) {
     }
     playbackRef.current.ctx = null;
     playbackRef.current.nextTime = 0;
-  }, [disconnectWs, stopCapture]);
+  }, [disconnectWs, stopCapture, appendLog]);
 
   useEffect(() => {
     return () => {

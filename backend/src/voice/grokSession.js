@@ -6,15 +6,26 @@ const GROK_REALTIME_URL = 'wss://api.x.ai/v1/realtime';
 /**
  * @param {import('ws').WebSocket} clientWs
  * @param {string} instructions System / voice instructions (Artemis prompt)
+ * @param {{ onFlushMemories?: (transcript: string) => Promise<unknown> }} [options]
  * @returns {Promise<{ shutdown: () => Promise<void>, getTranscript: () => string }>}
  */
-export async function createGrokVoiceBridge(clientWs, instructions) {
+export async function createGrokVoiceBridge(clientWs, instructions, options = {}) {
+  const { onFlushMemories } = options;
   const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) {
     throw new Error('Missing XAI_API_KEY');
   }
 
   const transcriptParts = [];
+  /** Dedupe user lines when both item.added and transcription.completed fire. */
+  function appendUserTranscriptLine(text) {
+    const t = text.trim();
+    if (!t) return;
+    const line = `User: ${t}`;
+    if (transcriptParts.includes(line)) return;
+    transcriptParts.push(line);
+    sendClient({ type: 'transcript', role: 'user', text: t });
+  }
   let assistantBuf = '';
   let toolBatch = [];
   /** @type {ReturnType<typeof setTimeout> | null} */
@@ -32,6 +43,15 @@ export async function createGrokVoiceBridge(clientWs, instructions) {
     } catch {
       /* ignore */
     }
+  }
+
+  function getTranscript() {
+    const tail = assistantBuf.trim();
+    const parts = [...transcriptParts];
+    if (tail) {
+      parts.push(`Assistant: ${tail}`);
+    }
+    return parts.join('\n');
   }
 
   async function flushToolBatch() {
@@ -157,10 +177,25 @@ export async function createGrokVoiceBridge(clientWs, instructions) {
       case 'conversation.item.input_audio_transcription.completed': {
         const t = event.transcript?.trim();
         if (t) {
-          transcriptParts.push(`User: ${t}`);
-          sendClient({ type: 'transcript', role: 'user', text: t });
+          appendUserTranscriptLine(t);
         }
         sendClient({ type: 'status', state: 'listening' });
+        break;
+      }
+
+      case 'conversation.item.added': {
+        const item = event.item;
+        if (item?.role === 'user' && Array.isArray(item.content)) {
+          for (const part of item.content) {
+            if (
+              part?.type === 'input_audio' &&
+              typeof part.transcript === 'string' &&
+              part.transcript.trim()
+            ) {
+              appendUserTranscriptLine(part.transcript);
+            }
+          }
+        }
         break;
       }
 
@@ -189,6 +224,39 @@ export async function createGrokVoiceBridge(clientWs, instructions) {
     } catch {
       return;
     }
+
+    if (msg.type === 'flush_memories') {
+      void (async () => {
+        try {
+          if (typeof onFlushMemories !== 'function') {
+            sendClient({
+              type: 'memories_flushed',
+              ok: false,
+              error: 'no_handler',
+            });
+            return;
+          }
+          const transcript = getTranscript();
+          const r = await onFlushMemories(transcript);
+          const stored =
+            r && typeof r === 'object' && 'stored' in r ? Number(r.stored) : 0;
+          sendClient({
+            type: 'memories_flushed',
+            ok: true,
+            stored: Number.isFinite(stored) ? stored : 0,
+            transcriptLen: transcript.length,
+          });
+        } catch (e) {
+          sendClient({
+            type: 'memories_flushed',
+            ok: false,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      })();
+      return;
+    }
+
     if (grokWs.readyState !== WebSocket.OPEN) return;
 
     if (msg.type === 'audio' && typeof msg.payload === 'string') {
@@ -205,8 +273,7 @@ export async function createGrokVoiceBridge(clientWs, instructions) {
     } else if (msg.type === 'user_text' && typeof msg.text === 'string') {
       const text = msg.text.trim().slice(0, 16000);
       if (!text) return;
-      transcriptParts.push(`User: ${text}`);
-      sendClient({ type: 'transcript', role: 'user', text });
+      appendUserTranscriptLine(text);
       grokWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));
       grokWs.send(
         JSON.stringify({
@@ -235,24 +302,31 @@ export async function createGrokVoiceBridge(clientWs, instructions) {
     sendClient({ type: 'status', state: 'idle' });
   });
 
+  const transcriptionModel =
+    process.env.XAI_VOICE_TRANSCRIPTION_MODEL?.trim() || 'whisper-1';
+  const sessionPayload = {
+    voice: 'Eve',
+    instructions,
+    /** Push-to-talk: client commits buffer + response.create on release (see handleClientMessage). */
+    turn_detection: null,
+    audio: {
+      input: {
+        format: { type: 'audio/pcm', rate: 24000 },
+      },
+      output: {
+        format: { type: 'audio/pcm', rate: 24000 },
+      },
+    },
+    tools: getGrokToolDefinitions(),
+  };
+  if (transcriptionModel !== 'off' && transcriptionModel !== 'false') {
+    sessionPayload.input_audio_transcription = { model: transcriptionModel };
+  }
+
   grokWs.send(
     JSON.stringify({
       type: 'session.update',
-      session: {
-        voice: 'Eve',
-        instructions,
-        /** Push-to-talk: client commits buffer + response.create on release (see handleClientMessage). */
-        turn_detection: null,
-        audio: {
-          input: {
-            format: { type: 'audio/pcm', rate: 24000 },
-          },
-          output: {
-            format: { type: 'audio/pcm', rate: 24000 },
-          },
-        },
-        tools: getGrokToolDefinitions(),
-      },
+      session: sessionPayload,
     })
   );
 
@@ -270,15 +344,6 @@ export async function createGrokVoiceBridge(clientWs, instructions) {
 
   sendClient({ type: 'session_ready' });
   sendClient({ type: 'status', state: 'listening' });
-
-  function getTranscript() {
-    const tail = assistantBuf.trim();
-    const parts = [...transcriptParts];
-    if (tail) {
-      parts.push(`Assistant: ${tail}`);
-    }
-    return parts.join('\n');
-  }
 
   async function shutdown() {
     clientWs.off('message', handleClientMessage);

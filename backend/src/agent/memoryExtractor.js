@@ -13,12 +13,14 @@ const CATEGORIES = new Set([
   'instruction',
 ]);
 
-const EXTRACTION_SYSTEM = `You are extracting long-term memories about a user named Greg from a voice conversation transcript.
+const EXTRACTION_SYSTEM = `You are extracting long-term memories about a user named Greg from a conversation transcript (voice or text).
 Return ONLY a JSON array (no markdown, no commentary). Each element must be an object with:
 - "text": concise third-person fact suitable for retrieval (one sentence).
 - "category": one of: personal_fact, preference, goal, project, emotional, instruction
 - "isContradiction": boolean — true if this statement replaces something Greg used to believe or a fact that is no longer true.
 - "contradicts": string or null — if isContradiction, a short paraphrase of the OLD belief/fact being replaced; else null.
+
+ALWAYS extract facts Greg explicitly asks you to remember or not forget (e.g. "remember that...", "don't forget...", "note that...", "keep in mind..."). Treat those as instruction or personal_fact with high priority.
 
 Skip small talk, greetings, and tool readouts unless they reveal something personal about Greg.
 If nothing worth storing, return [].`;
@@ -95,7 +97,7 @@ function parseMemoryArrayFromContent(content) {
 async function chatGrokJson(userContent) {
   const key = process.env.XAI_API_KEY;
   if (!key) throw new Error('Missing XAI_API_KEY');
-  const model = process.env.XAI_CHAT_MODEL || 'grok-2-latest';
+  const model = process.env.XAI_CHAT_MODEL || 'grok-4-1-fast-non-reasoning';
   const res = await fetch('https://api.x.ai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -157,7 +159,7 @@ async function isNearDuplicate(userId, text) {
  */
 export async function extractAndStoreMemories(transcript, userId) {
   const trimmed = transcript?.trim() ?? '';
-  if (trimmed.length < 20) {
+  if (trimmed.length < 12) {
     return [];
   }
 
@@ -242,7 +244,7 @@ export async function extractAndStoreMemories(transcript, userId) {
       top.text.toLowerCase() !== text.toLowerCase()
     ) {
       const key = process.env.XAI_API_KEY;
-      const model = process.env.XAI_CHAT_MODEL || 'grok-2-latest';
+      const model = process.env.XAI_CHAT_MODEL || 'grok-4-1-fast-non-reasoning';
       const res = await fetch('https://api.x.ai/v1/chat/completions', {
         method: 'POST',
         headers: {

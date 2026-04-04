@@ -74,6 +74,49 @@ export async function retrieveMemories(queryText, userId, topK = 10) {
   return out;
 }
 
+/** Diverse queries so one embedding direction does not hide unrelated stored memories. */
+const SESSION_MEMORY_QUERIES = [
+  'Greg personal preferences family friends work hobbies pets health daily life',
+  'things Greg asked to remember goals plans projects opinions background',
+  'Greg identity relationships important facts names places events',
+];
+
+/**
+ * Merge top hits from several semantic queries (same namespace) for session bootstrap.
+ * @param {string} userId
+ * @param {string} [profileHint] optional first query from Firestore profile
+ * @param {number} topK cap after merge
+ */
+export async function retrieveMemoriesForSession(userId, profileHint, topK = 16) {
+  const queries = [];
+  const hint = profileHint?.trim();
+  if (hint) queries.push(hint);
+  for (const q of SESSION_MEMORY_QUERIES) {
+    if (!queries.includes(q)) queries.push(q);
+  }
+
+  const perQuery = Math.max(8, Math.ceil((topK * 2) / queries.length));
+  const byId = new Map();
+
+  for (const q of queries) {
+    try {
+      const hits = await retrieveMemories(q, userId, perQuery);
+      for (const hit of hits) {
+        const prev = byId.get(hit.id);
+        if (!prev || (hit.score ?? 0) > (prev.score ?? 0)) {
+          byId.set(hit.id, hit);
+        }
+      }
+    } catch (e) {
+      console.error('[pinecone] retrieveMemoriesForSession query failed:', q, e);
+    }
+  }
+
+  return [...byId.values()]
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .slice(0, topK);
+}
+
 /**
  * Mark a memory vector as superseded (no longer used in retrieval).
  * @param {string} userId

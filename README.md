@@ -63,7 +63,7 @@ No changes are required in `grokSession.js` unless you need custom client protoc
 | Variable | Purpose |
 |----------|---------|
 | `XAI_API_KEY` | Grok Voice + text (memory extraction). |
-| `XAI_CHAT_MODEL` | Text model for extraction (default `grok-2-latest`). |
+| `XAI_CHAT_MODEL` | Text model for extraction (default `grok-4-1-fast-non-reasoning`). |
 | `OPENAI_API_KEY` | Embeddings only. |
 | `PINECONE_API_KEY` / `PINECONE_INDEX_NAME` | Vector DB. |
 | `FIREBASE_PROJECT_ID` / `FIREBASE_CLIENT_EMAIL` / `FIREBASE_PRIVATE_KEY` | Admin SDK. |

@@ -2,7 +2,7 @@ import WebSocket from 'ws';
 import { buildSystemPrompt } from './systemPrompt.js';
 import { extractAndStoreMemories } from './memoryExtractor.js';
 import { getUserProfile, logConversation } from '../db/firestore.js';
-import { retrieveMemories } from '../memory/pinecone.js';
+import { retrieveMemoriesForSession } from '../memory/pinecone.js';
 import { createGrokVoiceBridge } from '../voice/grokSession.js';
 
 /**
@@ -34,9 +34,9 @@ export async function startAgentSession(clientWs, userId) {
   const queryText = memoryQueryForSession(profile);
   let memories = [];
   try {
-    memories = await retrieveMemories(queryText, userId, 10);
+    memories = await retrieveMemoriesForSession(userId, queryText, 16);
   } catch (e) {
-    console.error('[agentLoop] retrieveMemories failed', e);
+    console.error('[agentLoop] retrieveMemoriesForSession failed', e);
   }
 
   const memorySlices = memories.map((m) => ({
@@ -45,7 +45,28 @@ export async function startAgentSession(clientWs, userId) {
   }));
 
   const instructions = buildSystemPrompt(memorySlices);
-  const bridge = await createGrokVoiceBridge(clientWs, instructions);
+  const bridge = await createGrokVoiceBridge(clientWs, instructions, {
+    async onFlushMemories(transcript) {
+      const t = transcript?.trim() ?? '';
+      console.log(`[agentLoop] flush_memories transcriptLen=${t.length}`);
+      if (t.length < 10) {
+        console.warn('[agentLoop] flush_memories: transcript very short, skipping extraction');
+        return { stored: 0 };
+      }
+      const extracted = await extractAndStoreMemories(transcript, userId);
+      const stored = extracted.filter((e) => e.storedId).length;
+      if (stored > 0) {
+        console.log(
+          `[agentLoop] flush_memories stored ${stored} new vector(s) for ${userId}`
+        );
+      } else {
+        console.log(
+          `[agentLoop] flush_memories: 0 new vectors (extracted ${extracted.length} row(s), may be skips/duplicates)`
+        );
+      }
+      return { stored };
+    },
+  });
 
   const pingMs = Number(process.env.WS_PING_INTERVAL_MS ?? 30000);
   /** @type {ReturnType<typeof setInterval> | null} */
@@ -73,11 +94,29 @@ export async function startAgentSession(clientWs, userId) {
     }
     clientWs.removeListener('close', onClientClose);
     clientWs.removeListener('error', onClientClose);
+    const transcriptBefore = bridge.getTranscript();
     await bridge.shutdown();
-    const transcript = bridge.getTranscript();
+    const transcriptAfter = bridge.getTranscript();
+    const transcript =
+      transcriptAfter.length >= transcriptBefore.length
+        ? transcriptAfter
+        : transcriptBefore;
+    console.log(
+      `[agentLoop] cleanup transcriptLen=${transcript.length} (beforeShutdown=${transcriptBefore.length})`
+    );
     let extracted = [];
     try {
       extracted = await extractAndStoreMemories(transcript, userId);
+      const stored = extracted.filter((e) => e.storedId).length;
+      if (stored > 0) {
+        console.log(
+          `[agentLoop] cleanup stored ${stored} new vector(s) for ${userId}`
+        );
+      } else if (transcript.trim().length >= 10) {
+        console.log(
+          `[agentLoop] cleanup: 0 new vectors from extraction (${extracted.length} row(s))`
+        );
+      }
     } catch (e) {
       console.error('[agentLoop] memory extraction failed', e);
     }

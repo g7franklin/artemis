@@ -86,8 +86,8 @@ function AppMain() {
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
           <button
             type="button"
-            onClick={() => {
-              endSession();
+            onClick={async () => {
+              await endSession();
               void logout();
             }}
             style={ghostBtn}
@@ -132,7 +132,7 @@ function AppMain() {
 
       <button
         type="button"
-        onClick={endSession}
+        onClick={() => void endSession()}
         style={{ ...ghostBtn, marginTop: '1.5rem' }}
       >
         End voice session

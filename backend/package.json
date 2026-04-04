@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test:vector": "node scripts/test-vector-store.mjs"
+    "test:vector": "node scripts/test-vector-store.mjs",
+    "inspect:pinecone": "node scripts/inspect-pinecone-user.mjs"
   },
   "dependencies": {
     "@pinecone-database/pinecone": "^5.0.2",
