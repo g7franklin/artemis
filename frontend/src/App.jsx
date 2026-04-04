@@ -1,8 +1,7 @@
 import { useCallback } from 'react';
 import { VoiceButton } from './components/VoiceButton.jsx';
 import { StatusIndicator } from './components/StatusIndicator.jsx';
-import { ConversationLog } from './components/ConversationLog.jsx';
-import { TextComposer } from './components/TextComposer.jsx';
+import { ChatPanel } from './components/ChatPanel.jsx';
 import { isFirebaseClientConfigured } from './lib/firebaseConfig.js';
 import { useAuth } from './hooks/useAuth.js';
 import { useVoiceSession } from './hooks/useVoiceSession.js';
@@ -35,6 +34,8 @@ function AppMain() {
     beginPushToTalk,
     endPushToTalk,
     endSession,
+    startNewSession,
+    restartingSession,
     sendTextMessage,
     textSending,
   } = useVoiceSession(user);
@@ -71,7 +72,7 @@ function AppMain() {
   }
 
   return (
-    <div style={shell}>
+    <div className="app-main-shell">
       <header
         style={{
           display: 'flex',
@@ -79,64 +80,74 @@ function AppMain() {
           alignItems: 'center',
           width: '100%',
           maxWidth: '420px',
-          marginBottom: '0.5rem',
+          flexShrink: 0,
+          marginBottom: '0.2rem',
         }}
       >
-        <h1 style={{ ...title, margin: 0, fontSize: '1.35rem' }}>Artemis</h1>
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        <h1 style={{ ...title, margin: 0, fontSize: 'clamp(1.05rem, 4vw, 1.3rem)' }}>
+          Artemis
+        </h1>
+        <div style={{ display: 'flex', gap: '0.35rem', alignItems: 'center' }}>
           <button
             type="button"
             onClick={async () => {
               await endSession();
               void logout();
             }}
-            style={ghostBtn}
+            style={{ ...ghostBtn, padding: '0.32rem 0.6rem', fontSize: '0.75rem' }}
           >
             Sign out
           </button>
         </div>
       </header>
 
-      <VoiceButton
-        voiceState={voiceState}
-        onPressStart={onPressStart}
-        onPressEnd={onPressEnd}
-      />
+      <div style={{ flexShrink: 0 }}>
+        <VoiceButton
+          voiceState={voiceState}
+          onPressStart={onPressStart}
+          onPressEnd={onPressEnd}
+        />
+      </div>
 
-      <StatusIndicator
-        voiceState={voiceState}
-        connectionState={connectionState}
-      />
+      <div style={{ flexShrink: 0 }}>
+        <StatusIndicator
+          voiceState={voiceState}
+          connectionState={connectionState}
+        />
+      </div>
 
       {lastError ? (
         <p
           style={{
             color: '#d66',
-            fontSize: '0.85rem',
-            marginTop: '1rem',
+            fontSize: '0.72rem',
+            marginTop: '0.25rem',
+            marginBottom: 0,
             textAlign: 'center',
-            maxWidth: '320px',
+            maxWidth: '100%',
+            padding: '0 0.25rem',
+            lineHeight: 1.35,
+            overflow: 'hidden',
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            flexShrink: 0,
           }}
         >
           {lastError}
         </p>
       ) : null}
 
-      <ConversationLog lines={logLines} />
-
-      <TextComposer
-        disabled={connectionState !== 'connected'}
-        sending={textSending}
-        onSend={sendTextMessage}
-      />
-
-      <button
-        type="button"
-        onClick={() => void endSession()}
-        style={{ ...ghostBtn, marginTop: '1.5rem' }}
-      >
-        End voice session
-      </button>
+      <div className="app-main-chat-slot">
+        <ChatPanel
+          lines={logLines}
+          disabled={connectionState !== 'connected'}
+          sending={textSending}
+          onSend={sendTextMessage}
+          onStartNewSession={() => void startNewSession()}
+          restartingSession={restartingSession}
+        />
+      </div>
     </div>
   );
 }

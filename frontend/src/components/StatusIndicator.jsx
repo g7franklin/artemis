@@ -21,11 +21,11 @@ export function StatusIndicator({ voiceState, connectionState }) {
     <div
       style={{
         textAlign: 'center',
-        fontSize: '0.95rem',
-        letterSpacing: '0.04em',
+        fontSize: '0.7rem',
+        letterSpacing: '0.06em',
         textTransform: 'uppercase',
         color: '#888',
-        marginTop: '1.25rem',
+        marginTop: '0.3rem',
       }}
     >
       {label}

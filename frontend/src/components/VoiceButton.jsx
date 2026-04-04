@@ -33,13 +33,15 @@ export function VoiceButton({
       ? voiceState
       : 'idle';
 
+  const btnSize = 'clamp(144px, 35vmin, 202px)';
+
   return (
     <div
       style={{
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        gap: '0.5rem',
+        gap: '0.2rem',
         userSelect: 'none',
         touchAction: 'none',
       }}
@@ -80,8 +82,8 @@ export function VoiceButton({
           end();
         }}
         style={{
-          width: 'min(88vw, 280px)',
-          height: 'min(88vw, 280px)',
+          width: btnSize,
+          height: btnSize,
           borderRadius: '50%',
           border: 'none',
           background:
@@ -135,13 +137,15 @@ export function VoiceButton({
       <p
         style={{
           margin: 0,
-          fontSize: '0.85rem',
+          fontSize: '0.68rem',
           color: '#666',
-          maxWidth: '260px',
+          maxWidth: 'min(280px, 92vw)',
           textAlign: 'center',
+          lineHeight: 1.35,
+          padding: '0 0.25rem',
         }}
       >
-        Hold the button while you speak. Release when you&apos;re done.
+        Hold to talk · release when finished
       </p>
       <style>{`
         @keyframes pulse-ring {
@@ -159,10 +163,9 @@ export function VoiceButton({
 }
 
 function MicIcon({ active }) {
+  const s = 'clamp(55px, 17.3vmin, 80px)';
   return (
     <svg
-      width="72"
-      height="72"
       viewBox="0 0 24 24"
       fill="none"
       style={{
@@ -171,6 +174,8 @@ function MicIcon({ active }) {
         margin: 'auto',
         display: 'block',
         paddingTop: '4px',
+        width: s,
+        height: s,
       }}
       aria-hidden
     >
@@ -212,7 +217,7 @@ function WaveformBars() {
           style={{
             width: '6px',
             height: `${h}%`,
-            maxHeight: '100px',
+            maxHeight: 'min(56px, 45%)',
             background: 'linear-gradient(180deg, #7eb8ff, #4a7ac8)',
             borderRadius: '3px',
             animation: `wave 0.5s ease-in-out ${i * 0.07}s infinite alternate`,

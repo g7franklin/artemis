@@ -69,11 +69,14 @@ export function useVoiceSession(authUser) {
   const [lastError, setLastError] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [textSending, setTextSending] = useState(false);
+  const [restartingSession, setRestartingSession] = useState(false);
 
   const wsRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef(null);
   const intentionalCloseRef = useRef(false);
+  /** When true, `onclose` skips logging "Disconnected" (e.g. immediate reconnect). */
+  const skipDisconnectLogRef = useRef(false);
 
   const captureRef = useRef({
     stream: null,
@@ -101,6 +104,7 @@ export function useVoiceSession(authUser) {
   const connectWsRef = useRef(null);
   /** Resolves when `memories_flushed` arrives after `flush_memories` send. */
   const pendingMemoriesFlushRef = useRef(null);
+  const startNewSessionBusyRef = useRef(false);
 
   const appendLog = useCallback((line) => {
     setLogLines((prev) => [...prev.slice(-200), line]);
@@ -194,7 +198,11 @@ export function useVoiceSession(authUser) {
     }
   }, []);
 
-  const disconnectWs = useCallback(() => {
+  const disconnectWs = useCallback((opts = {}) => {
+    const { silentDisconnectLog = false } = opts;
+    if (silentDisconnectLog) {
+      skipDisconnectLogRef.current = true;
+    }
     intentionalCloseRef.current = true;
     clearReconnectTimer();
     reconnectAttemptRef.current = 0;
@@ -296,7 +304,11 @@ export function useVoiceSession(authUser) {
               cb?.(msg);
             }
             if (msg.type === 'audio' && msg.payload) {
-              playPcmBase64(msg.payload);
+              try {
+                playPcmBase64(msg.payload);
+              } catch {
+                /* decode/playback can fail without blocking transcript handling */
+              }
             } else if (msg.type === 'status' && msg.state) {
               setVoiceState(msg.state);
             } else if (msg.type === 'error') {
@@ -338,7 +350,10 @@ export function useVoiceSession(authUser) {
 
           if (intentionalCloseRef.current) {
             setConnectionState('disconnected');
-            appendLog('Disconnected');
+            if (!skipDisconnectLogRef.current) {
+              appendLog('Disconnected');
+            }
+            skipDisconnectLogRef.current = false;
             finish(() => reject(new Error('Disconnected')));
             return;
           }
@@ -584,6 +599,55 @@ export function useVoiceSession(authUser) {
     playbackRef.current.nextTime = 0;
   }, [disconnectWs, stopCapture, appendLog]);
 
+  const startNewSession = useCallback(async () => {
+    if (!authUser || startNewSessionBusyRef.current) return;
+    startNewSessionBusyRef.current = true;
+    setRestartingSession(true);
+    setLastError(null);
+    try {
+      const ws = wsRef.current;
+      if (
+        ws?.readyState === WebSocket.OPEN &&
+        sessionReadyReceivedRef.current
+      ) {
+        await new Promise((resolve) => {
+          const finish = () => resolve();
+          const timeout = setTimeout(() => {
+            pendingMemoriesFlushRef.current = null;
+            finish();
+          }, 10000);
+          pendingMemoriesFlushRef.current = () => {
+            clearTimeout(timeout);
+            finish();
+          };
+          try {
+            ws.send(JSON.stringify({ type: 'flush_memories' }));
+          } catch {
+            clearTimeout(timeout);
+            pendingMemoriesFlushRef.current = null;
+            finish();
+          }
+        });
+      }
+      isPushIntendedRef.current = false;
+      pushActiveRef.current = false;
+      stopCapture();
+      setVoiceState('idle');
+      disconnectWs({ silentDisconnectLog: true });
+      setLogLines([]);
+      await connectWs();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg !== 'Disconnected') {
+        setLastError(msg);
+        appendLog(`New session: ${msg}`);
+      }
+    } finally {
+      startNewSessionBusyRef.current = false;
+      setRestartingSession(false);
+    }
+  }, [authUser, appendLog, connectWs, disconnectWs, stopCapture]);
+
   useEffect(() => {
     return () => {
       intentionalCloseRef.current = true;
@@ -604,6 +668,8 @@ export function useVoiceSession(authUser) {
     beginPushToTalk,
     endPushToTalk,
     endSession,
+    startNewSession,
+    restartingSession,
     connectWs,
     sendTextMessage,
     textSending,

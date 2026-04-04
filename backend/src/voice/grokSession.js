@@ -27,6 +27,8 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
     sendClient({ type: 'transcript', role: 'user', text: t });
   }
   let assistantBuf = '';
+  /** Assistant plain-text stream when session uses text modality (e.g. typed user messages). */
+  let assistantTextBuf = '';
   let toolBatch = [];
   /** @type {ReturnType<typeof setTimeout> | null} */
   let toolFlushTimer = null;
@@ -46,10 +48,14 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
   }
 
   function getTranscript() {
-    const tail = assistantBuf.trim();
     const parts = [...transcriptParts];
-    if (tail) {
-      parts.push(`Assistant: ${tail}`);
+    const tailText = assistantTextBuf.trim();
+    const tailAudio = assistantBuf.trim();
+    if (tailText) {
+      parts.push(`Assistant: ${tailText}`);
+    }
+    if (tailAudio) {
+      parts.push(`Assistant: ${tailAudio}`);
     }
     return parts.join('\n');
   }
@@ -164,6 +170,10 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
         assistantBuf += event.delta ?? '';
         break;
 
+      case 'response.text.delta':
+        assistantTextBuf += event.delta ?? '';
+        break;
+
       case 'response.output_audio_transcript.done': {
         const line = assistantBuf.trim();
         assistantBuf = '';
@@ -199,9 +209,19 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
         break;
       }
 
-      case 'response.done':
+      case 'response.done': {
+        const textOut = assistantTextBuf.trim();
+        assistantTextBuf = '';
+        if (textOut) {
+          const line = `Assistant: ${textOut}`;
+          if (!transcriptParts.includes(line)) {
+            transcriptParts.push(line);
+            sendClient({ type: 'transcript', role: 'assistant', text: textOut });
+          }
+        }
         sendClient({ type: 'status', state: 'listening' });
         break;
+      }
 
       case 'error':
         sendClient({
@@ -319,6 +339,9 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
     },
     tools: getGrokToolDefinitions(),
   };
+  if (process.env.XAI_VOICE_MODALITIES?.trim() !== 'off') {
+    sessionPayload.modalities = ['audio', 'text'];
+  }
   if (transcriptionModel !== 'off' && transcriptionModel !== 'false') {
     sessionPayload.input_audio_transcription = { model: transcriptionModel };
   }

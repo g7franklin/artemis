@@ -11,6 +11,36 @@ body,
   margin: 0;
 }
 
+/* Main signed-in UI: one viewport, no page scroll; chat list scrolls inside. */
+.app-main-shell {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: max(0.45rem, env(safe-area-inset-top)) 0.75rem
+    max(0.35rem, env(safe-area-inset-bottom));
+  box-sizing: border-box;
+}
+
+.app-main-chat-slot {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (min-width: 640px) {
+  .app-main-shell {
+    padding-top: max(1rem, env(safe-area-inset-top));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+}
+
 body {
   font-family:
     system-ui,
