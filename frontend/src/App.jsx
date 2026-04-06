@@ -30,13 +30,13 @@ function AppMain() {
     connectionState,
     voiceState,
     micLive,
+    assistantPlaybackActive,
     lastError,
     logLines,
     toggleMic,
     endSession,
-    startNewSession,
+    clearChatLog,
     stopChat,
-    restartingSession,
     sendTextMessage,
     textSending,
   } = useVoiceSession(user);
@@ -102,6 +102,7 @@ function AppMain() {
         <VoiceButton
           voiceState={voiceState}
           micLive={micLive}
+          assistantPlaybackActive={assistantPlaybackActive}
           disabled={connectionState !== 'connected'}
           onToggle={onToggleMic}
         />
@@ -142,9 +143,8 @@ function AppMain() {
           disabled={connectionState !== 'connected'}
           sending={textSending}
           onSend={sendTextMessage}
-          onStartNewSession={() => void startNewSession()}
+          onClearChat={clearChatLog}
           onStopChat={() => void stopChat()}
-          restartingSession={restartingSession}
         />
       </div>
     </div>

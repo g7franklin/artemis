@@ -4,11 +4,18 @@ import { useCallback } from 'react';
  * @param {{
  *   voiceState: string,
  *   micLive: boolean,
+ *   assistantPlaybackActive?: boolean,
  *   disabled?: boolean,
  *   onToggle: () => void,
  * }} props
  */
-export function VoiceButton({ voiceState, micLive, disabled = false, onToggle }) {
+export function VoiceButton({
+  voiceState,
+  micLive,
+  assistantPlaybackActive = false,
+  disabled = false,
+  onToggle,
+}) {
   const click = useCallback(() => {
     if (disabled) return;
     onToggle();
@@ -16,9 +23,11 @@ export function VoiceButton({ voiceState, micLive, disabled = false, onToggle })
 
   const visualState = micLive
     ? 'listening'
-    : voiceState === 'speaking' || voiceState === 'thinking'
-      ? voiceState
-      : 'idle';
+    : voiceState === 'thinking'
+      ? 'thinking'
+      : voiceState === 'speaking' || assistantPlaybackActive
+        ? 'speaking'
+        : 'idle';
 
   const btnSize = 'clamp(144px, 35vmin, 202px)';
 
@@ -59,7 +68,9 @@ export function VoiceButton({ voiceState, micLive, disabled = false, onToggle })
         aria-label={
           micLive
             ? 'Stop sending and let Artemis reply'
-            : 'Start talking to Artemis'
+            : visualState === 'speaking'
+              ? 'Stop Artemis audio and start talking'
+              : 'Start talking to Artemis'
         }
       >
         {visualState === 'listening' ? (
@@ -106,10 +117,10 @@ export function VoiceButton({ voiceState, micLive, disabled = false, onToggle })
         }}
       >
         Tap to talk · say &quot;over and out&quot; or tap again to send (Chrome
-        / Edge). Say &quot;stay smooth, Arty&quot; or &quot;stay smooth
-        already&quot; to hang up (keeps this chat on screen). After Artemis
-        replies, tap once to pause without sending if you haven&apos;t spoken
-        yet.
+        / Edge). While Artemis is speaking, tap the mic to cut her off and talk.
+        The mic turns on again after her audio finishes. Say &quot;stay smooth…&quot;
+        to stop chat (saves memories, reconnects). After she replies, tap once
+        to pause without sending if you haven&apos;t spoken yet.
       </p>
       <style>{`
         @keyframes pulse-ring {

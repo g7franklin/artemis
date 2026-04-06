@@ -18,9 +18,8 @@ function parseLogLine(line) {
  *   disabled?: boolean,
  *   sending?: boolean,
  *   onSend: (text: string) => void | Promise<void>,
- *   onStartNewSession?: () => void | Promise<void>,
+ *   onClearChat?: () => void,
  *   onStopChat?: () => void | Promise<void>,
- *   restartingSession?: boolean,
  * }} props
  */
 export function ChatPanel({
@@ -28,9 +27,8 @@ export function ChatPanel({
   disabled = false,
   sending = false,
   onSend,
-  onStartNewSession,
+  onClearChat,
   onStopChat,
-  restartingSession = false,
 }) {
   const [value, setValue] = useState('');
   const [focused, setFocused] = useState(false);
@@ -304,36 +302,26 @@ export function ChatPanel({
                 flexShrink: 0,
               }}
             >
-              {onStartNewSession ? (
+              {onClearChat ? (
                 <button
                   type="button"
                   className="chat-panel-new-btn"
-                  disabled={restartingSession}
-                  aria-busy={restartingSession}
-                  title={
-                    restartingSession
-                      ? 'Starting new session…'
-                      : 'End this chat and connect fresh'
-                  }
-                  aria-label={
-                    restartingSession
-                      ? 'Starting new session'
-                      : 'Start new chat'
-                  }
-                  onClick={() => void onStartNewSession()}
+                  title="Remove all messages from this view only (does not save memories or disconnect)"
+                  aria-label="Clear chat"
+                  onClick={() => onClearChat()}
                 >
-                  {restartingSession ? '…' : 'New chat'}
+                  Clear chat
                 </button>
               ) : null}
               {onStopChat ? (
                 <button
                   type="button"
                   className="chat-panel-new-btn"
-                  disabled={disabled || restartingSession}
+                  disabled={disabled}
                   title={
                     disabled
                       ? 'Connect first to stop chat'
-                      : 'Hang up: close connection and stop the mic; keep messages on screen'
+                      : 'Save memories, end this voice session, and reconnect so you can use the mic again'
                   }
                   aria-label="Stop chat"
                   onClick={() => void onStopChat()}

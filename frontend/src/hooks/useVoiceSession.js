@@ -83,8 +83,8 @@ export function useVoiceSession(authUser) {
   const [lastError, setLastError] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [textSending, setTextSending] = useState(false);
-  const [restartingSession, setRestartingSession] = useState(false);
-
+  /** True while assistant PCM is still playing locally (may overlap server "listening"). */
+  const [assistantPlaybackActive, setAssistantPlaybackActive] = useState(false);
   const wsRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef(null);
@@ -103,9 +103,14 @@ export function useVoiceSession(authUser) {
     ctx: null,
     nextTime: 0,
   });
+  const playbackActiveSourcesRef = useRef(new Set());
+  const playbackIdleTimerRef = useRef(null);
+  /** True if current assistant turn included audio chunks (reopen mic after local playback, not transcript). */
+  const responseHadAssistantAudioRef = useRef(false);
+  const assistantPlaybackActiveRef = useRef(false);
 
   const pushActiveRef = useRef(false);
-  /** Conversation mode: auto-reopen mic after assistant; new chat / sign-out / refresh ends it. */
+  /** Conversation mode: auto-reopen mic after assistant; stop chat / sign-out / refresh ends it. */
   const conversationActiveRef = useRef(false);
   /**
    * After auto-reopen, first mic tap dismisses to idle (no commit) unless the user
@@ -119,8 +124,8 @@ export function useVoiceSession(authUser) {
   const connectInFlightRef = useRef(null);
   const connectWsRef = useRef(null);
   const pendingMemoriesFlushRef = useRef(null);
-  const startNewSessionBusyRef = useRef(false);
   const reopenMicTimerRef = useRef(null);
+  const stopChatInFlightRef = useRef(false);
   const phraseRecognitionRef = useRef(null);
 
   /** Latest handlers for WebSocket onmessage (avoids stale closures). */
@@ -128,10 +133,15 @@ export function useVoiceSession(authUser) {
     onUserTranscriptForPhrase: () => {},
     onEndChatPhrase: () => {},
     onAssistantTranscriptDone: () => {},
+    onAssistantPlaybackFinished: () => {},
   });
 
   const appendLog = useCallback((line) => {
     setLogLines((prev) => [...prev.slice(-200), line]);
+  }, []);
+
+  const clearChatLog = useCallback(() => {
+    setLogLines([]);
   }, []);
 
   const stopPhraseWatch = useCallback(() => {
@@ -260,6 +270,48 @@ export function useVoiceSession(authUser) {
     }
   }, [ensurePlaybackContext]);
 
+  const stopAssistantPlayback = useCallback(() => {
+    if (playbackIdleTimerRef.current) {
+      clearTimeout(playbackIdleTimerRef.current);
+      playbackIdleTimerRef.current = null;
+    }
+    const ctx = playbackRef.current.ctx;
+    if (ctx && playbackActiveSourcesRef.current.size > 0) {
+      for (const src of [...playbackActiveSourcesRef.current]) {
+        try {
+          src.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+      playbackActiveSourcesRef.current.clear();
+    }
+    if (ctx) {
+      playbackRef.current.nextTime = ctx.currentTime;
+    }
+    if (assistantPlaybackActiveRef.current) {
+      assistantPlaybackActiveRef.current = false;
+      setAssistantPlaybackActive(false);
+    }
+  }, []);
+
+  const debounceAssistantPlaybackEnd = useCallback(() => {
+    if (playbackIdleTimerRef.current) {
+      clearTimeout(playbackIdleTimerRef.current);
+    }
+    const ctx = playbackRef.current.ctx;
+    if (!ctx) return;
+    const ms = Math.max(
+      80,
+      (playbackRef.current.nextTime - ctx.currentTime) * 1000 + 220
+    );
+    playbackIdleTimerRef.current = setTimeout(() => {
+      playbackIdleTimerRef.current = null;
+      if (playbackActiveSourcesRef.current.size > 0) return;
+      handlersRef.current.onAssistantPlaybackFinished?.();
+    }, ms);
+  }, []);
+
   const playPcmBase64 = useCallback(
     (base64) => {
       const int16 = decodeBase64ToInt16(base64);
@@ -278,10 +330,20 @@ export function useVoiceSession(authUser) {
       if (nextTime < now) {
         nextTime = now;
       }
+      playbackActiveSourcesRef.current.add(src);
+      src.onended = () => {
+        playbackActiveSourcesRef.current.delete(src);
+        debounceAssistantPlaybackEnd();
+      };
       src.start(nextTime);
       playbackRef.current.nextTime = nextTime + buffer.duration;
+      if (!assistantPlaybackActiveRef.current) {
+        assistantPlaybackActiveRef.current = true;
+        setAssistantPlaybackActive(true);
+      }
+      debounceAssistantPlaybackEnd();
     },
-    [ensurePlaybackContext]
+    [ensurePlaybackContext, debounceAssistantPlaybackEnd]
   );
 
   const clearReconnectTimer = useCallback(() => {
@@ -398,6 +460,7 @@ export function useVoiceSession(authUser) {
               cb?.(msg);
             }
             if (msg.type === 'audio' && msg.payload) {
+              responseHadAssistantAudioRef.current = true;
               try {
                 playPcmBase64(msg.payload);
               } catch {
@@ -474,6 +537,7 @@ export function useVoiceSession(authUser) {
             clearTimeout(reopenMicTimerRef.current);
             reopenMicTimerRef.current = null;
           }
+          stopAssistantPlayback();
 
           if (intentionalCloseRef.current) {
             setConnectionState('disconnected');
@@ -527,6 +591,7 @@ export function useVoiceSession(authUser) {
     stopCapture,
     clearReconnectTimer,
     stopPhraseWatch,
+    stopAssistantPlayback,
   ]);
 
   connectWsRef.current = connectWs;
@@ -597,6 +662,7 @@ export function useVoiceSession(authUser) {
   const endUserTurn = useCallback(() => {
     if (!pushActiveRef.current) return;
     stopPhraseWatch();
+    responseHadAssistantAudioRef.current = false;
     micTapHangsUpRef.current = false;
     userSpokeSinceReopenRef.current = false;
     const ws = wsRef.current;
@@ -616,48 +682,58 @@ export function useVoiceSession(authUser) {
     });
   }, [stopCapture, stopPhraseWatch]);
 
-  const scheduleReopenMicAfterAssistant = useCallback(() => {
-    if (!conversationActiveRef.current) return;
-    if (pushActiveRef.current) return;
-    if (reopenMicTimerRef.current) {
-      clearTimeout(reopenMicTimerRef.current);
-    }
-    reopenMicTimerRef.current = setTimeout(() => {
-      reopenMicTimerRef.current = null;
+  const scheduleReopenMicAfterAssistant = useCallback(
+    (delayMs = 400) => {
       if (!conversationActiveRef.current) return;
       if (pushActiveRef.current) return;
-      /* Allow TTS to finish; skip only if a new user turn is being processed. */
-      if (voiceStateRef.current === 'thinking') return;
+      if (reopenMicTimerRef.current) {
+        clearTimeout(reopenMicTimerRef.current);
+      }
+      reopenMicTimerRef.current = setTimeout(() => {
+        reopenMicTimerRef.current = null;
+        if (!conversationActiveRef.current) return;
+        if (pushActiveRef.current) return;
+        if (voiceStateRef.current === 'thinking') return;
 
-      const resume = async () => {
-        try {
-          if (!captureRef.current.stream || !captureRef.current.processor) {
-            await startMicStreaming();
+        const resume = async () => {
+          try {
+            if (!captureRef.current.stream || !captureRef.current.processor) {
+              await startMicStreaming();
+            }
+            if (!conversationActiveRef.current) return;
+            pushActiveRef.current = true;
+            setMicLive(true);
+            setVoiceState('listening');
+            voiceStateRef.current = 'listening';
+            micTapHangsUpRef.current = true;
+            userSpokeSinceReopenRef.current = false;
+            startPhraseWatch();
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            setLastError(msg);
+            appendLog(`Mic resume: ${msg}`);
           }
-          if (!conversationActiveRef.current) return;
-          pushActiveRef.current = true;
-          setMicLive(true);
-          setVoiceState('listening');
-          voiceStateRef.current = 'listening';
-          micTapHangsUpRef.current = true;
-          userSpokeSinceReopenRef.current = false;
-          startPhraseWatch();
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          setLastError(msg);
-          appendLog(`Mic resume: ${msg}`);
-        }
-      };
-      void resume();
-    }, 1200);
-  }, [startMicStreaming, appendLog, startPhraseWatch]);
+        };
+        void resume();
+      }, delayMs);
+    },
+    [startMicStreaming, appendLog, startPhraseWatch]
+  );
 
   useLayoutEffect(() => {
     handlersRef.current.onUserTranscriptForPhrase = () => {
       endUserTurn();
     };
     handlersRef.current.onAssistantTranscriptDone = () => {
-      scheduleReopenMicAfterAssistant();
+      if (responseHadAssistantAudioRef.current) return;
+      scheduleReopenMicAfterAssistant(450);
+    };
+    handlersRef.current.onAssistantPlaybackFinished = () => {
+      assistantPlaybackActiveRef.current = false;
+      setAssistantPlaybackActive(false);
+      if (!conversationActiveRef.current || pushActiveRef.current) return;
+      if (voiceStateRef.current === 'thinking') return;
+      scheduleReopenMicAfterAssistant(200);
     };
   }, [endUserTurn, scheduleReopenMicAfterAssistant]);
 
@@ -685,10 +761,59 @@ export function useVoiceSession(authUser) {
     resetVoiceToIdle('Voice conversation stopped');
   }, [resetVoiceToIdle]);
 
+  const interruptAssistantAndListen = useCallback(async () => {
+    if (reopenMicTimerRef.current) {
+      clearTimeout(reopenMicTimerRef.current);
+      reopenMicTimerRef.current = null;
+    }
+    stopAssistantPlayback();
+    responseHadAssistantAudioRef.current = false;
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: 'cancel_response' }));
+      } catch {
+        /* ignore */
+      }
+    }
+    micTapHangsUpRef.current = false;
+    userSpokeSinceReopenRef.current = false;
+    try {
+      if (!captureRef.current.stream || !captureRef.current.processor) {
+        await startMicStreaming();
+      }
+      if (!conversationActiveRef.current) return;
+      pushActiveRef.current = true;
+      setMicLive(true);
+      setVoiceState('listening');
+      voiceStateRef.current = 'listening';
+      startPhraseWatch();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setLastError(msg);
+      appendLog(`Interrupt: ${msg}`);
+    }
+  }, [
+    stopAssistantPlayback,
+    startMicStreaming,
+    startPhraseWatch,
+    appendLog,
+  ]);
+
   const toggleMic = useCallback(async () => {
     setLastError(null);
 
-    if (voiceStateRef.current === 'speaking' || voiceStateRef.current === 'thinking') {
+    const canInterruptAssistant =
+      conversationActiveRef.current &&
+      (voiceStateRef.current === 'speaking' || assistantPlaybackActiveRef.current);
+
+    if (canInterruptAssistant) {
+      await unlockPlaybackForUserGesture();
+      await interruptAssistantAndListen();
+      return;
+    }
+
+    if (voiceStateRef.current === 'thinking') {
       return;
     }
 
@@ -762,6 +887,7 @@ export function useVoiceSession(authUser) {
     appendLog,
     startPhraseWatch,
     resetVoiceToIdle,
+    interruptAssistantAndListen,
   ]);
 
   const sendTextMessage = useCallback(
@@ -838,78 +964,22 @@ export function useVoiceSession(authUser) {
     }
     disconnectWs();
     stopCapture();
+    stopAssistantPlayback();
     const p = playbackRef.current.ctx;
     if (p && p.state !== 'closed') {
       void p.close().catch(() => {});
     }
     playbackRef.current.ctx = null;
     playbackRef.current.nextTime = 0;
-  }, [disconnectWs, stopCapture, appendLog, stopPhraseWatch]);
+  }, [disconnectWs, stopCapture, appendLog, stopPhraseWatch, stopAssistantPlayback]);
 
-  /** Like hanging up: flush memories if possible, close WS, stop mic — keep chat log. */
+  /**
+   * Stop chat / “stay smooth”: flush memories, close WS and mic, then open a
+   * fresh WebSocket so the mic can be used again anytime. Chat log stays.
+   */
   const endVoiceChatKeepLog = useCallback(async () => {
-    if (reopenMicTimerRef.current) {
-      clearTimeout(reopenMicTimerRef.current);
-      reopenMicTimerRef.current = null;
-    }
-    stopPhraseWatch();
-    micTapHangsUpRef.current = false;
-    userSpokeSinceReopenRef.current = false;
-    conversationActiveRef.current = false;
-    pushActiveRef.current = false;
-    setMicLive(false);
-
-    const ws = wsRef.current;
-    if (
-      ws?.readyState === WebSocket.OPEN &&
-      sessionReadyReceivedRef.current
-    ) {
-      await new Promise((resolve) => {
-        const finish = () => resolve();
-        const timeout = setTimeout(() => {
-          pendingMemoriesFlushRef.current = null;
-          finish();
-        }, 10000);
-        pendingMemoriesFlushRef.current = (ack) => {
-          clearTimeout(timeout);
-          if (ack?.ok) {
-            const n = Number(ack.stored) || 0;
-            appendLog(
-              n > 0
-                ? `Saved ${n} memory update(s).`
-                : 'Session saved (no new memories extracted).'
-            );
-          } else if (ack && !ack.ok) {
-            appendLog(`Memory save: ${ack.error || 'failed'}`);
-          }
-          finish();
-        };
-        try {
-          ws.send(JSON.stringify({ type: 'flush_memories' }));
-        } catch {
-          clearTimeout(timeout);
-          pendingMemoriesFlushRef.current = null;
-          finish();
-        }
-      });
-    }
-    disconnectWs({ silentDisconnectLog: true });
-    stopCapture();
-    const p = playbackRef.current.ctx;
-    if (p && p.state !== 'closed') {
-      void p.close().catch(() => {});
-    }
-    playbackRef.current.ctx = null;
-    playbackRef.current.nextTime = 0;
-    appendLog(
-      'Voice chat ended — mic off. Tap the mic or send text to reconnect.'
-    );
-  }, [disconnectWs, stopCapture, appendLog, stopPhraseWatch]);
-
-  const startNewSession = useCallback(async () => {
-    if (!authUser || startNewSessionBusyRef.current) return;
-    startNewSessionBusyRef.current = true;
-    setRestartingSession(true);
+    if (!authUser || stopChatInFlightRef.current) return;
+    stopChatInFlightRef.current = true;
     setLastError(null);
     if (reopenMicTimerRef.current) {
       clearTimeout(reopenMicTimerRef.current);
@@ -921,6 +991,7 @@ export function useVoiceSession(authUser) {
     conversationActiveRef.current = false;
     pushActiveRef.current = false;
     setMicLive(false);
+
     try {
       const ws = wsRef.current;
       if (
@@ -933,8 +1004,18 @@ export function useVoiceSession(authUser) {
             pendingMemoriesFlushRef.current = null;
             finish();
           }, 10000);
-          pendingMemoriesFlushRef.current = () => {
+          pendingMemoriesFlushRef.current = (ack) => {
             clearTimeout(timeout);
+            if (ack?.ok) {
+              const n = Number(ack.stored) || 0;
+              appendLog(
+                n > 0
+                  ? `Saved ${n} memory update(s).`
+                  : 'Session saved (no new memories extracted).'
+              );
+            } else if (ack && !ack.ok) {
+              appendLog(`Memory save: ${ack.error || 'failed'}`);
+            }
             finish();
           };
           try {
@@ -950,19 +1031,32 @@ export function useVoiceSession(authUser) {
       setVoiceState('idle');
       voiceStateRef.current = 'idle';
       disconnectWs({ silentDisconnectLog: true });
-      setLogLines([]);
+      stopAssistantPlayback();
+      const p = playbackRef.current.ctx;
+      if (p && p.state !== 'closed') {
+        void p.close().catch(() => {});
+      }
+      playbackRef.current.ctx = null;
+      playbackRef.current.nextTime = 0;
       await connectWs();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg !== 'Disconnected') {
         setLastError(msg);
-        appendLog(`New session: ${msg}`);
+        appendLog(`Reconnect after stop: ${msg}`);
       }
     } finally {
-      startNewSessionBusyRef.current = false;
-      setRestartingSession(false);
+      stopChatInFlightRef.current = false;
     }
-  }, [authUser, appendLog, connectWs, disconnectWs, stopCapture, stopPhraseWatch]);
+  }, [
+    authUser,
+    appendLog,
+    connectWs,
+    disconnectWs,
+    stopCapture,
+    stopPhraseWatch,
+    stopAssistantPlayback,
+  ]);
 
   useLayoutEffect(() => {
     handlersRef.current.onEndChatPhrase = () => {
@@ -979,26 +1073,27 @@ export function useVoiceSession(authUser) {
       }
       stopPhraseWatch();
       stopCapture();
+      stopAssistantPlayback();
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
     };
-  }, [clearReconnectTimer, stopCapture, stopPhraseWatch]);
+  }, [clearReconnectTimer, stopCapture, stopPhraseWatch, stopAssistantPlayback]);
 
   return {
     connectionState,
     voiceState,
     micLive,
+    assistantPlaybackActive,
     lastError,
     logLines,
     toggleMic,
     stopVoiceConversation,
     endSession,
-    startNewSession,
-    /** Hang up: flush if possible, close WS, stop mic; keep on-screen log (same as “stay smooth” phrase). */
+    clearChatLog,
+    /** Flush memories, close WS, reconnect; keep log (Stop chat + “stay smooth”). */
     stopChat: endVoiceChatKeepLog,
-    restartingSession,
     connectWs,
     sendTextMessage,
     textSending,

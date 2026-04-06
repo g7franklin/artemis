@@ -313,6 +313,9 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
       );
       grokWs.send(JSON.stringify({ type: 'response.create' }));
       sendClient({ type: 'status', state: 'thinking' });
+    } else if (msg.type === 'cancel_response') {
+      grokWs.send(JSON.stringify({ type: 'response.cancel' }));
+      sendClient({ type: 'status', state: 'listening' });
     } else if (msg.type === 'ping') {
       sendClient({ type: 'pong' });
     }
