@@ -19,6 +19,7 @@ function parseLogLine(line) {
  *   sending?: boolean,
  *   onSend: (text: string) => void | Promise<void>,
  *   onStartNewSession?: () => void | Promise<void>,
+ *   onStopChat?: () => void | Promise<void>,
  *   restartingSession?: boolean,
  * }} props
  */
@@ -28,6 +29,7 @@ export function ChatPanel({
   sending = false,
   onSend,
   onStartNewSession,
+  onStopChat,
   restartingSession = false,
 }) {
   const [value, setValue] = useState('');
@@ -321,6 +323,22 @@ export function ChatPanel({
                   onClick={() => void onStartNewSession()}
                 >
                   {restartingSession ? '…' : 'New chat'}
+                </button>
+              ) : null}
+              {onStopChat ? (
+                <button
+                  type="button"
+                  className="chat-panel-new-btn"
+                  disabled={disabled || restartingSession}
+                  title={
+                    disabled
+                      ? 'Connect first to stop chat'
+                      : 'Hang up: close connection and stop the mic; keep messages on screen'
+                  }
+                  aria-label="Stop chat"
+                  onClick={() => void onStopChat()}
+                >
+                  Stop chat
                 </button>
               ) : null}
               <span

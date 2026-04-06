@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 const TARGET_SAMPLE_RATE = 24000;
 const BACKOFF_BASE_MS = 1000;
@@ -60,12 +60,26 @@ function buildWsUrl(baseUrl, token) {
   return u.toString();
 }
 
+const OVER_AND_OUT = /\bover\s+and\s+out\b/i;
+/**
+ * End voice + disconnect WebSocket; keeps on-screen log. Matches what Greg says
+ * ("stay smooth, Arty") and common STT ("stay smooth already").
+ */
+const STAY_SMOOTH_END_CHAT = /\bstay\s+smooth,?\s+(arty|already)\b/i;
+
+/** Browser STT while mic is live — Grok user transcripts only arrive after buffer commit (end_turn). */
+function getSpeechRecognitionCtor() {
+  if (typeof window === 'undefined') return null;
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
 /**
  * @param {{ getIdToken: () => Promise<string> }} authUser Firebase user
  */
 export function useVoiceSession(authUser) {
   const [connectionState, setConnectionState] = useState('disconnected');
   const [voiceState, setVoiceState] = useState('idle');
+  const [micLive, setMicLive] = useState(false);
   const [lastError, setLastError] = useState(null);
   const [logLines, setLogLines] = useState([]);
   const [textSending, setTextSending] = useState(false);
@@ -75,7 +89,6 @@ export function useVoiceSession(authUser) {
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef(null);
   const intentionalCloseRef = useRef(false);
-  /** When true, `onclose` skips logging "Disconnected" (e.g. immediate reconnect). */
   const skipDisconnectLogRef = useRef(false);
 
   const captureRef = useRef({
@@ -92,23 +105,104 @@ export function useVoiceSession(authUser) {
   });
 
   const pushActiveRef = useRef(false);
-  /** True from pointer-down until pointer-up; used to abort in-flight connect if user releases early. */
-  const isPushIntendedRef = useRef(false);
-  /** Fires once backend sends session_ready (Grok configured). */
+  /** Conversation mode: auto-reopen mic after assistant; new chat / sign-out / refresh ends it. */
+  const conversationActiveRef = useRef(false);
+  /**
+   * After auto-reopen, first mic tap dismisses to idle (no commit) unless the user
+   * spoke (VAD) or ends with "over and out" (endUserTurn).
+   */
+  const micTapHangsUpRef = useRef(false);
+  const userSpokeSinceReopenRef = useRef(false);
+  const voiceStateRef = useRef('idle');
   const pendingSessionReadyRef = useRef(null);
-  /** True after `session_ready` for the current socket; cleared on close. */
   const sessionReadyReceivedRef = useRef(false);
-  /** Deduplicates concurrent connectWs while handshake is in flight. */
   const connectInFlightRef = useRef(null);
-  /** @type {React.MutableRefObject<(() => Promise<unknown>) | null>} */
   const connectWsRef = useRef(null);
-  /** Resolves when `memories_flushed` arrives after `flush_memories` send. */
   const pendingMemoriesFlushRef = useRef(null);
   const startNewSessionBusyRef = useRef(false);
+  const reopenMicTimerRef = useRef(null);
+  const phraseRecognitionRef = useRef(null);
+
+  /** Latest handlers for WebSocket onmessage (avoids stale closures). */
+  const handlersRef = useRef({
+    onUserTranscriptForPhrase: () => {},
+    onEndChatPhrase: () => {},
+    onAssistantTranscriptDone: () => {},
+  });
 
   const appendLog = useCallback((line) => {
     setLogLines((prev) => [...prev.slice(-200), line]);
   }, []);
+
+  const stopPhraseWatch = useCallback(() => {
+    const r = phraseRecognitionRef.current;
+    phraseRecognitionRef.current = null;
+    if (!r) return;
+    try {
+      r.onresult = null;
+      r.onerror = null;
+      r.onend = null;
+    } catch {
+      /* ignore */
+    }
+    try {
+      r.stop();
+    } catch {
+      /* ignore */
+    }
+    try {
+      r.abort();
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const startPhraseWatch = useCallback(() => {
+    const Ctor = getSpeechRecognitionCtor();
+    if (!Ctor) return;
+    stopPhraseWatch();
+    const r = new Ctor();
+    phraseRecognitionRef.current = r;
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = 'en-US';
+
+    r.onresult = (event) => {
+      if (!pushActiveRef.current || !conversationActiveRef.current) return;
+      const vs = voiceStateRef.current;
+      if (vs === 'speaking' || vs === 'thinking') return;
+      let full = '';
+      for (let i = 0; i < event.results.length; i++) {
+        full += event.results[i][0].transcript;
+      }
+      if (STAY_SMOOTH_END_CHAT.test(full)) {
+        handlersRef.current.onEndChatPhrase();
+      } else if (OVER_AND_OUT.test(full)) {
+        handlersRef.current.onUserTranscriptForPhrase();
+      }
+    };
+
+    r.onerror = () => {};
+
+    r.onend = () => {
+      if (phraseRecognitionRef.current !== r) return;
+      if (!pushActiveRef.current || !conversationActiveRef.current) return;
+      const vs = voiceStateRef.current;
+      if (vs === 'speaking' || vs === 'thinking') return;
+      try {
+        r.start();
+      } catch {
+        /* already started */
+      }
+    };
+
+    try {
+      r.start();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      appendLog(`Phrase listen: ${msg}`);
+    }
+  }, [stopPhraseWatch, appendLog]);
 
   const stopCapture = useCallback(() => {
     const c = captureRef.current;
@@ -159,7 +253,6 @@ export function useVoiceSession(authUser) {
     return ctx;
   }, []);
 
-  /** Await inside the user gesture that starts push-to-talk (Safari / iOS). */
   const unlockPlaybackForUserGesture = useCallback(async () => {
     const ctx = ensurePlaybackContext();
     if (ctx.state === 'suspended') {
@@ -213,6 +306,7 @@ export function useVoiceSession(authUser) {
     }
     setConnectionState('disconnected');
     setVoiceState('idle');
+    voiceStateRef.current = 'idle';
   }, [clearReconnectTimer]);
 
   const connectWs = useCallback(async () => {
@@ -307,10 +401,11 @@ export function useVoiceSession(authUser) {
               try {
                 playPcmBase64(msg.payload);
               } catch {
-                /* decode/playback can fail without blocking transcript handling */
+                /* ignore */
               }
             } else if (msg.type === 'status' && msg.state) {
               setVoiceState(msg.state);
+              voiceStateRef.current = msg.state;
             } else if (msg.type === 'error') {
               setLastError(msg.message || 'Server error');
               appendLog(`Error: ${msg.message || 'unknown'}`);
@@ -319,8 +414,30 @@ export function useVoiceSession(authUser) {
             } else if (msg.type === 'transcript' && typeof msg.text === 'string') {
               const who = msg.role === 'user' ? 'You' : 'Artemis';
               appendLog(`${who}: ${msg.text}`);
+              if (msg.role === 'user') {
+                /* Phrase is handled live via Web Speech API; fallback if server sends text before commit. */
+                if (
+                  conversationActiveRef.current &&
+                  pushActiveRef.current &&
+                  STAY_SMOOTH_END_CHAT.test(msg.text)
+                ) {
+                  handlersRef.current.onEndChatPhrase();
+                } else if (
+                  conversationActiveRef.current &&
+                  pushActiveRef.current &&
+                  OVER_AND_OUT.test(msg.text)
+                ) {
+                  handlersRef.current.onUserTranscriptForPhrase();
+                }
+              } else if (msg.role === 'assistant') {
+                handlersRef.current.onAssistantTranscriptDone();
+              }
             } else if (msg.type === 'vad' && msg.phase === 'start') {
               setVoiceState('listening');
+              voiceStateRef.current = 'listening';
+              if (micTapHangsUpRef.current) {
+                userSpokeSinceReopenRef.current = true;
+              }
             }
           } catch {
             /* ignore non-json */
@@ -344,9 +461,19 @@ export function useVoiceSession(authUser) {
           if (wsRef.current === ws) {
             wsRef.current = null;
           }
+          stopPhraseWatch();
           stopCapture();
           pushActiveRef.current = false;
+          conversationActiveRef.current = false;
+          micTapHangsUpRef.current = false;
+          userSpokeSinceReopenRef.current = false;
+          setMicLive(false);
           setVoiceState('idle');
+          voiceStateRef.current = 'idle';
+          if (reopenMicTimerRef.current) {
+            clearTimeout(reopenMicTimerRef.current);
+            reopenMicTimerRef.current = null;
+          }
 
           if (intentionalCloseRef.current) {
             setConnectionState('disconnected');
@@ -393,139 +520,249 @@ export function useVoiceSession(authUser) {
         connectInFlightRef.current = null;
       }
     }
-  }, [authUser, appendLog, playPcmBase64, stopCapture, clearReconnectTimer]);
+  }, [
+    authUser,
+    appendLog,
+    playPcmBase64,
+    stopCapture,
+    clearReconnectTimer,
+    stopPhraseWatch,
+  ]);
 
   connectWsRef.current = connectWs;
 
-  /** Open the voice WebSocket as soon as the user is signed in so the first hold is not stuck in handshake. */
   useEffect(() => {
     const uid = authUser?.uid;
     if (!uid) return;
     void connectWsRef.current?.().catch(() => {});
   }, [authUser?.uid]);
 
-  const startMicStreaming = useCallback(async (existingStream = null) => {
-    stopCapture();
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      await connectWs();
-    }
+  const startMicStreaming = useCallback(
+    async (existingStream = null) => {
+      stopCapture();
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        await connectWs();
+      }
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        throw new Error('Not connected');
+      }
+
+      try {
+        const stream =
+          existingStream ??
+          (await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              channelCount: 1,
+            },
+          }));
+
+        const ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+        if (ctx.state === 'suspended') {
+          await ctx.resume();
+        }
+        const source = ctx.createMediaStreamSource(stream);
+        const bufferSize = 4096;
+        const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
+        const mute = ctx.createGain();
+        mute.gain.value = 0;
+
+        processor.onaudioprocess = (e) => {
+          if (!pushActiveRef.current) return;
+          const input = e.inputBuffer.getChannelData(0);
+          const rate = ctx.sampleRate;
+          const resampled = resampleFloat32(input, rate, TARGET_SAMPLE_RATE);
+          const pcm16 = floatTo16BitPCM(resampled);
+          const b64 = arrayBufferToBase64(pcm16.buffer);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'audio', payload: b64 }));
+          }
+        };
+
+        source.connect(processor);
+        processor.connect(mute);
+        mute.connect(ctx.destination);
+
+        captureRef.current = { stream, ctx, processor, mute, source };
+      } catch (e) {
+        stopCapture();
+        throw e;
+      }
+    },
+    [connectWs, stopCapture]
+  );
+
+  const endUserTurn = useCallback(() => {
+    if (!pushActiveRef.current) return;
+    stopPhraseWatch();
+    micTapHangsUpRef.current = false;
+    userSpokeSinceReopenRef.current = false;
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      throw new Error('Not connected');
+    pushActiveRef.current = false;
+    setMicLive(false);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'end_turn' }));
+        }
+        if (!conversationActiveRef.current) {
+          stopCapture();
+        }
+        setVoiceState('thinking');
+        voiceStateRef.current = 'thinking';
+      });
+    });
+  }, [stopCapture, stopPhraseWatch]);
+
+  const scheduleReopenMicAfterAssistant = useCallback(() => {
+    if (!conversationActiveRef.current) return;
+    if (pushActiveRef.current) return;
+    if (reopenMicTimerRef.current) {
+      clearTimeout(reopenMicTimerRef.current);
+    }
+    reopenMicTimerRef.current = setTimeout(() => {
+      reopenMicTimerRef.current = null;
+      if (!conversationActiveRef.current) return;
+      if (pushActiveRef.current) return;
+      /* Allow TTS to finish; skip only if a new user turn is being processed. */
+      if (voiceStateRef.current === 'thinking') return;
+
+      const resume = async () => {
+        try {
+          if (!captureRef.current.stream || !captureRef.current.processor) {
+            await startMicStreaming();
+          }
+          if (!conversationActiveRef.current) return;
+          pushActiveRef.current = true;
+          setMicLive(true);
+          setVoiceState('listening');
+          voiceStateRef.current = 'listening';
+          micTapHangsUpRef.current = true;
+          userSpokeSinceReopenRef.current = false;
+          startPhraseWatch();
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          setLastError(msg);
+          appendLog(`Mic resume: ${msg}`);
+        }
+      };
+      void resume();
+    }, 1200);
+  }, [startMicStreaming, appendLog, startPhraseWatch]);
+
+  useLayoutEffect(() => {
+    handlersRef.current.onUserTranscriptForPhrase = () => {
+      endUserTurn();
+    };
+    handlersRef.current.onAssistantTranscriptDone = () => {
+      scheduleReopenMicAfterAssistant();
+    };
+  }, [endUserTurn, scheduleReopenMicAfterAssistant]);
+
+  const resetVoiceToIdle = useCallback(
+    (logLine) => {
+      if (reopenMicTimerRef.current) {
+        clearTimeout(reopenMicTimerRef.current);
+        reopenMicTimerRef.current = null;
+      }
+      micTapHangsUpRef.current = false;
+      userSpokeSinceReopenRef.current = false;
+      stopPhraseWatch();
+      conversationActiveRef.current = false;
+      pushActiveRef.current = false;
+      setMicLive(false);
+      stopCapture();
+      setVoiceState('idle');
+      voiceStateRef.current = 'idle';
+      if (logLine) appendLog(logLine);
+    },
+    [stopCapture, appendLog, stopPhraseWatch]
+  );
+
+  const stopVoiceConversation = useCallback(() => {
+    resetVoiceToIdle('Voice conversation stopped');
+  }, [resetVoiceToIdle]);
+
+  const toggleMic = useCallback(async () => {
+    setLastError(null);
+
+    if (voiceStateRef.current === 'speaking' || voiceStateRef.current === 'thinking') {
+      return;
     }
 
-    try {
-      const stream =
-        existingStream ??
-        (await navigator.mediaDevices.getUserMedia({
+    if (!conversationActiveRef.current) {
+      micTapHangsUpRef.current = false;
+      userSpokeSinceReopenRef.current = false;
+      conversationActiveRef.current = true;
+      let earlyStream = null;
+      try {
+        await unlockPlaybackForUserGesture();
+        const micPromise = navigator.mediaDevices.getUserMedia({
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
             channelCount: 1,
           },
-        }));
-
-      const ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-      }
-      const source = ctx.createMediaStreamSource(stream);
-      const bufferSize = 4096;
-      const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
-      const mute = ctx.createGain();
-      mute.gain.value = 0;
-
-      processor.onaudioprocess = (e) => {
-        if (!pushActiveRef.current) return;
-        const input = e.inputBuffer.getChannelData(0);
-        const rate = ctx.sampleRate;
-        const resampled = resampleFloat32(input, rate, TARGET_SAMPLE_RATE);
-        const pcm16 = floatTo16BitPCM(resampled);
-        const b64 = arrayBufferToBase64(pcm16.buffer);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'audio', payload: b64 }));
-        }
-      };
-
-      source.connect(processor);
-      processor.connect(mute);
-      mute.connect(ctx.destination);
-
-      captureRef.current = { stream, ctx, processor, mute, source };
-    } catch (e) {
-      stopCapture();
-      throw e;
-    }
-  }, [connectWs, stopCapture]);
-
-  const beginPushToTalk = useCallback(async () => {
-    setLastError(null);
-    isPushIntendedRef.current = true;
-    let earlyStream = null;
-    try {
-      await unlockPlaybackForUserGesture();
-      const micPromise = navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          channelCount: 1,
-        },
-      });
-      await connectWs();
-      if (!isPushIntendedRef.current) {
-        earlyStream = await micPromise.catch(() => null);
-        earlyStream?.getTracks().forEach((t) => t.stop());
-        return;
-      }
-      earlyStream = await micPromise;
-      if (!isPushIntendedRef.current) {
-        earlyStream.getTracks().forEach((t) => t.stop());
+        });
+        await connectWs();
+        earlyStream = await micPromise;
+        pushActiveRef.current = false;
+        await startMicStreaming(earlyStream);
         earlyStream = null;
+        pushActiveRef.current = true;
+        setMicLive(true);
+        setVoiceState('listening');
+        voiceStateRef.current = 'listening';
+        appendLog('Listening…');
+        startPhraseWatch();
+      } catch (e) {
+        earlyStream?.getTracks().forEach((t) => t.stop());
+        conversationActiveRef.current = false;
+        pushActiveRef.current = false;
+        setMicLive(false);
+        const msg = e instanceof Error ? e.message : String(e);
+        setLastError(msg);
+        appendLog(`Mic / connect: ${msg}`);
+      }
+      return;
+    }
+
+    if (pushActiveRef.current) {
+      if (micTapHangsUpRef.current && !userSpokeSinceReopenRef.current) {
+        resetVoiceToIdle('Tap mic when you want to talk again');
         return;
       }
-      pushActiveRef.current = false;
-      await startMicStreaming(earlyStream);
-      earlyStream = null;
-      if (!isPushIntendedRef.current) {
-        stopCapture();
-        return;
+      endUserTurn();
+      return;
+    }
+
+    try {
+      micTapHangsUpRef.current = false;
+      userSpokeSinceReopenRef.current = false;
+      if (!captureRef.current.stream || !captureRef.current.processor) {
+        await startMicStreaming();
       }
       pushActiveRef.current = true;
+      setMicLive(true);
       setVoiceState('listening');
-      appendLog('Listening…');
+      voiceStateRef.current = 'listening';
+      startPhraseWatch();
     } catch (e) {
-      earlyStream?.getTracks().forEach((t) => t.stop());
       const msg = e instanceof Error ? e.message : String(e);
       setLastError(msg);
-      appendLog(`Mic / connect: ${msg}`);
-      pushActiveRef.current = false;
-    } finally {
-      if (!pushActiveRef.current) {
-        isPushIntendedRef.current = false;
-      }
+      appendLog(`Mic: ${msg}`);
     }
   }, [
     unlockPlaybackForUserGesture,
     connectWs,
     startMicStreaming,
+    endUserTurn,
     appendLog,
-    stopCapture,
+    startPhraseWatch,
+    resetVoiceToIdle,
   ]);
-
-  const endPushToTalk = useCallback(() => {
-    isPushIntendedRef.current = false;
-    const ws = wsRef.current;
-    setVoiceState((s) => (s === 'speaking' || s === 'thinking' ? s : 'idle'));
-    requestAnimationFrame(() => {
-      pushActiveRef.current = false;
-      requestAnimationFrame(() => {
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'end_turn' }));
-        }
-        stopCapture();
-      });
-    });
-  }, [stopCapture]);
 
   const sendTextMessage = useCallback(
     async (text) => {
@@ -555,6 +792,16 @@ export function useVoiceSession(authUser) {
   );
 
   const endSession = useCallback(async () => {
+    if (reopenMicTimerRef.current) {
+      clearTimeout(reopenMicTimerRef.current);
+      reopenMicTimerRef.current = null;
+    }
+    stopPhraseWatch();
+    micTapHangsUpRef.current = false;
+    userSpokeSinceReopenRef.current = false;
+    conversationActiveRef.current = false;
+    pushActiveRef.current = false;
+    setMicLive(false);
     const ws = wsRef.current;
     if (
       ws?.readyState === WebSocket.OPEN &&
@@ -597,13 +844,83 @@ export function useVoiceSession(authUser) {
     }
     playbackRef.current.ctx = null;
     playbackRef.current.nextTime = 0;
-  }, [disconnectWs, stopCapture, appendLog]);
+  }, [disconnectWs, stopCapture, appendLog, stopPhraseWatch]);
+
+  /** Like hanging up: flush memories if possible, close WS, stop mic — keep chat log. */
+  const endVoiceChatKeepLog = useCallback(async () => {
+    if (reopenMicTimerRef.current) {
+      clearTimeout(reopenMicTimerRef.current);
+      reopenMicTimerRef.current = null;
+    }
+    stopPhraseWatch();
+    micTapHangsUpRef.current = false;
+    userSpokeSinceReopenRef.current = false;
+    conversationActiveRef.current = false;
+    pushActiveRef.current = false;
+    setMicLive(false);
+
+    const ws = wsRef.current;
+    if (
+      ws?.readyState === WebSocket.OPEN &&
+      sessionReadyReceivedRef.current
+    ) {
+      await new Promise((resolve) => {
+        const finish = () => resolve();
+        const timeout = setTimeout(() => {
+          pendingMemoriesFlushRef.current = null;
+          finish();
+        }, 10000);
+        pendingMemoriesFlushRef.current = (ack) => {
+          clearTimeout(timeout);
+          if (ack?.ok) {
+            const n = Number(ack.stored) || 0;
+            appendLog(
+              n > 0
+                ? `Saved ${n} memory update(s).`
+                : 'Session saved (no new memories extracted).'
+            );
+          } else if (ack && !ack.ok) {
+            appendLog(`Memory save: ${ack.error || 'failed'}`);
+          }
+          finish();
+        };
+        try {
+          ws.send(JSON.stringify({ type: 'flush_memories' }));
+        } catch {
+          clearTimeout(timeout);
+          pendingMemoriesFlushRef.current = null;
+          finish();
+        }
+      });
+    }
+    disconnectWs({ silentDisconnectLog: true });
+    stopCapture();
+    const p = playbackRef.current.ctx;
+    if (p && p.state !== 'closed') {
+      void p.close().catch(() => {});
+    }
+    playbackRef.current.ctx = null;
+    playbackRef.current.nextTime = 0;
+    appendLog(
+      'Voice chat ended — mic off. Tap the mic or send text to reconnect.'
+    );
+  }, [disconnectWs, stopCapture, appendLog, stopPhraseWatch]);
 
   const startNewSession = useCallback(async () => {
     if (!authUser || startNewSessionBusyRef.current) return;
     startNewSessionBusyRef.current = true;
     setRestartingSession(true);
     setLastError(null);
+    if (reopenMicTimerRef.current) {
+      clearTimeout(reopenMicTimerRef.current);
+      reopenMicTimerRef.current = null;
+    }
+    stopPhraseWatch();
+    micTapHangsUpRef.current = false;
+    userSpokeSinceReopenRef.current = false;
+    conversationActiveRef.current = false;
+    pushActiveRef.current = false;
+    setMicLive(false);
     try {
       const ws = wsRef.current;
       if (
@@ -629,10 +946,9 @@ export function useVoiceSession(authUser) {
           }
         });
       }
-      isPushIntendedRef.current = false;
-      pushActiveRef.current = false;
       stopCapture();
       setVoiceState('idle');
+      voiceStateRef.current = 'idle';
       disconnectWs({ silentDisconnectLog: true });
       setLogLines([]);
       await connectWs();
@@ -646,29 +962,42 @@ export function useVoiceSession(authUser) {
       startNewSessionBusyRef.current = false;
       setRestartingSession(false);
     }
-  }, [authUser, appendLog, connectWs, disconnectWs, stopCapture]);
+  }, [authUser, appendLog, connectWs, disconnectWs, stopCapture, stopPhraseWatch]);
+
+  useLayoutEffect(() => {
+    handlersRef.current.onEndChatPhrase = () => {
+      void endVoiceChatKeepLog();
+    };
+  }, [endVoiceChatKeepLog]);
 
   useEffect(() => {
     return () => {
       intentionalCloseRef.current = true;
       clearReconnectTimer();
+      if (reopenMicTimerRef.current) {
+        clearTimeout(reopenMicTimerRef.current);
+      }
+      stopPhraseWatch();
       stopCapture();
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
     };
-  }, [clearReconnectTimer, stopCapture]);
+  }, [clearReconnectTimer, stopCapture, stopPhraseWatch]);
 
   return {
     connectionState,
     voiceState,
+    micLive,
     lastError,
     logLines,
-    beginPushToTalk,
-    endPushToTalk,
+    toggleMic,
+    stopVoiceConversation,
     endSession,
     startNewSession,
+    /** Hang up: flush if possible, close WS, stop mic; keep on-screen log (same as “stay smooth” phrase). */
+    stopChat: endVoiceChatKeepLog,
     restartingSession,
     connectWs,
     sendTextMessage,

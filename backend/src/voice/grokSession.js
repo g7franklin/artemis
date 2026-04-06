@@ -1,16 +1,20 @@
 import WebSocket from 'ws';
 import { executeTool, getGrokToolDefinitions } from '../tools/toolRegistry.js';
+import { stripEndTurnCueFromUserText } from './stripEndTurnCue.js';
 
 const GROK_REALTIME_URL = 'wss://api.x.ai/v1/realtime';
 
 /**
  * @param {import('ws').WebSocket} clientWs
  * @param {string} instructions System / voice instructions (Artemis prompt)
- * @param {{ onFlushMemories?: (transcript: string) => Promise<unknown> }} [options]
+ * @param {{
+ *   userId?: string,
+ *   onFlushMemories?: (transcript: string) => Promise<unknown>,
+ * }} [options]
  * @returns {Promise<{ shutdown: () => Promise<void>, getTranscript: () => string }>}
  */
 export async function createGrokVoiceBridge(clientWs, instructions, options = {}) {
-  const { onFlushMemories } = options;
+  const { onFlushMemories, userId } = options;
   const apiKey = process.env.XAI_API_KEY;
   if (!apiKey) {
     throw new Error('Missing XAI_API_KEY');
@@ -19,7 +23,7 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
   const transcriptParts = [];
   /** Dedupe user lines when both item.added and transcription.completed fire. */
   function appendUserTranscriptLine(text) {
-    const t = text.trim();
+    const t = stripEndTurnCueFromUserText(text);
     if (!t) return;
     const line = `User: ${t}`;
     if (transcriptParts.includes(line)) return;
@@ -75,7 +79,7 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
           }
           let result;
           try {
-            result = await executeTool(ev.name, args);
+            result = await executeTool(ev.name, args, { userId });
           } catch (err) {
             result = {
               error: err instanceof Error ? err.message : String(err),
@@ -291,7 +295,9 @@ export async function createGrokVoiceBridge(clientWs, instructions, options = {}
       grokWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
       sendClient({ type: 'status', state: 'thinking' });
     } else if (msg.type === 'user_text' && typeof msg.text === 'string') {
-      const text = msg.text.trim().slice(0, 16000);
+      const text = stripEndTurnCueFromUserText(
+        msg.text.trim().slice(0, 16000)
+      );
       if (!text) return;
       appendUserTranscriptLine(text);
       grokWs.send(JSON.stringify({ type: 'input_audio_buffer.clear' }));

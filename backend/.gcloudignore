@@ -1,0 +1,6 @@
+# Cloud Build upload context (same syntax as .gitignore)
+node_modules/
+.env
+.git
+*.log
+npm-debug.log*

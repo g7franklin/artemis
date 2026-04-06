@@ -29,24 +29,21 @@ function AppMain() {
   const {
     connectionState,
     voiceState,
+    micLive,
     lastError,
     logLines,
-    beginPushToTalk,
-    endPushToTalk,
+    toggleMic,
     endSession,
     startNewSession,
+    stopChat,
     restartingSession,
     sendTextMessage,
     textSending,
   } = useVoiceSession(user);
 
-  const onPressStart = useCallback(() => {
-    void beginPushToTalk();
-  }, [beginPushToTalk]);
-
-  const onPressEnd = useCallback(() => {
-    endPushToTalk();
-  }, [endPushToTalk]);
+  const onToggleMic = useCallback(() => {
+    void toggleMic();
+  }, [toggleMic]);
 
   if (loading) {
     return (
@@ -104,8 +101,9 @@ function AppMain() {
       <div style={{ flexShrink: 0 }}>
         <VoiceButton
           voiceState={voiceState}
-          onPressStart={onPressStart}
-          onPressEnd={onPressEnd}
+          micLive={micLive}
+          disabled={connectionState !== 'connected'}
+          onToggle={onToggleMic}
         />
       </div>
 
@@ -145,6 +143,7 @@ function AppMain() {
           sending={textSending}
           onSend={sendTextMessage}
           onStartNewSession={() => void startNewSession()}
+          onStopChat={() => void stopChat()}
           restartingSession={restartingSession}
         />
       </div>

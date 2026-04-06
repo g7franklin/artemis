@@ -122,7 +122,7 @@ If Firebase web env vars are missing or still placeholders, the UI shows a short
   - `./scripts/deploy-frontend.sh` or `cd frontend && npm run build && cd .. && firebase deploy --only hosting`.  
   - `firebase.json` serves **`frontend/dist`** and SPA-rewrites to `index.html`.
 
-**Note:** `gcloud run deploy --set-env-vars-from-file` expects a flat env file. Multi-line `FIREBASE_PRIVATE_KEY` is often easier via **Secret Manager** or the Cloud Run console.
+**Note:** `gcloud run deploy --env-vars-file` accepts ENV or YAML. Multi-line `FIREBASE_PRIVATE_KEY` is often easier via **Secret Manager** or the Cloud Run console.
 
 ## Install as PWA on iPhone
 

@@ -1,33 +1,20 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 
 /**
  * @param {{
  *   voiceState: string,
+ *   micLive: boolean,
  *   disabled?: boolean,
- *   onPressStart: () => void,
- *   onPressEnd: () => void,
+ *   onToggle: () => void,
  * }} props
  */
-export function VoiceButton({
-  voiceState,
-  disabled = false,
-  onPressStart,
-  onPressEnd,
-}) {
-  const [pressing, setPressing] = useState(false);
-
-  const start = useCallback(() => {
+export function VoiceButton({ voiceState, micLive, disabled = false, onToggle }) {
+  const click = useCallback(() => {
     if (disabled) return;
-    setPressing(true);
-    onPressStart();
-  }, [disabled, onPressStart]);
+    onToggle();
+  }, [disabled, onToggle]);
 
-  const end = useCallback(() => {
-    setPressing(false);
-    onPressEnd();
-  }, [onPressEnd]);
-
-  const visualState = pressing
+  const visualState = micLive
     ? 'listening'
     : voiceState === 'speaking' || voiceState === 'thinking'
       ? voiceState
@@ -43,44 +30,12 @@ export function VoiceButton({
         alignItems: 'center',
         gap: '0.2rem',
         userSelect: 'none',
-        touchAction: 'none',
       }}
     >
       <button
         type="button"
         disabled={disabled}
-        onPointerDown={(e) => {
-          e.preventDefault();
-          try {
-            e.currentTarget.setPointerCapture(e.pointerId);
-          } catch {
-            /* ignore */
-          }
-          start();
-        }}
-        onPointerUp={(e) => {
-          try {
-            if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
-              e.currentTarget.releasePointerCapture(e.pointerId);
-            }
-          } catch {
-            /* ignore */
-          }
-          end();
-        }}
-        onPointerLeave={(e) => {
-          if (e.buttons === 0) end();
-        }}
-        onPointerCancel={(e) => {
-          try {
-            if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
-              e.currentTarget.releasePointerCapture(e.pointerId);
-            }
-          } catch {
-            /* ignore */
-          }
-          end();
-        }}
+        onClick={click}
         style={{
           width: btnSize,
           height: btnSize,
@@ -98,9 +53,14 @@ export function VoiceButton({
           overflow: 'hidden',
           opacity: disabled ? 0.45 : 1,
           transition: 'box-shadow 0.2s ease, transform 0.15s ease',
-          transform: pressing ? 'scale(0.97)' : 'scale(1)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
         }}
-        aria-label="Hold to talk to Artemis"
+        aria-pressed={micLive}
+        aria-label={
+          micLive
+            ? 'Stop sending and let Artemis reply'
+            : 'Start talking to Artemis'
+        }
       >
         {visualState === 'listening' ? (
           <span
@@ -145,7 +105,11 @@ export function VoiceButton({
           padding: '0 0.25rem',
         }}
       >
-        Hold to talk · release when finished
+        Tap to talk · say &quot;over and out&quot; or tap again to send (Chrome
+        / Edge). Say &quot;stay smooth, Arty&quot; or &quot;stay smooth
+        already&quot; to hang up (keeps this chat on screen). After Artemis
+        replies, tap once to pause without sending if you haven&apos;t spoken
+        yet.
       </p>
       <style>{`
         @keyframes pulse-ring {

@@ -79,6 +79,7 @@ const SESSION_MEMORY_QUERIES = [
   'Greg personal preferences family friends work hobbies pets health daily life',
   'things Greg asked to remember goals plans projects opinions background',
   'Greg identity relationships important facts names places events',
+  'Greg romantic partner girlfriend boyfriend spouse dating marriage family members by name',
 ];
 
 /**
@@ -87,7 +88,7 @@ const SESSION_MEMORY_QUERIES = [
  * @param {string} [profileHint] optional first query from Firestore profile
  * @param {number} topK cap after merge
  */
-export async function retrieveMemoriesForSession(userId, profileHint, topK = 16) {
+export async function retrieveMemoriesForSession(userId, profileHint, topK = 28) {
   const queries = [];
   const hint = profileHint?.trim();
   if (hint) queries.push(hint);
@@ -95,7 +96,7 @@ export async function retrieveMemoriesForSession(userId, profileHint, topK = 16)
     if (!queries.includes(q)) queries.push(q);
   }
 
-  const perQuery = Math.max(8, Math.ceil((topK * 2) / queries.length));
+  const perQuery = Math.max(10, Math.ceil((topK * 2) / queries.length));
   const byId = new Map();
 
   for (const q of queries) {

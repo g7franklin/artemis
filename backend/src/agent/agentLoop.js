@@ -34,7 +34,7 @@ export async function startAgentSession(clientWs, userId) {
   const queryText = memoryQueryForSession(profile);
   let memories = [];
   try {
-    memories = await retrieveMemoriesForSession(userId, queryText, 16);
+    memories = await retrieveMemoriesForSession(userId, queryText, 28);
   } catch (e) {
     console.error('[agentLoop] retrieveMemoriesForSession failed', e);
   }
@@ -46,6 +46,7 @@ export async function startAgentSession(clientWs, userId) {
 
   const instructions = buildSystemPrompt(memorySlices);
   const bridge = await createGrokVoiceBridge(clientWs, instructions, {
+    userId,
     async onFlushMemories(transcript) {
       const t = transcript?.trim() ?? '';
       console.log(`[agentLoop] flush_memories transcriptLen=${t.length}`);
